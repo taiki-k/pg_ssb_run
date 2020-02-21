@@ -7,20 +7,10 @@ import argparse
 import psycopg2
 from psycopg2.extras import Json
 import datetime, time
-#import fcntl
+import configparser
 import concurrent.futures
 
-
-# ======================= config =====================
-# PostgreSQL
-pg_server = u'localhost'
-pg_port = u'5432'
-pg_database = u'ssb_results'
-pg_user = u'postgres'
-pg_pass = u'dummy'
-# ====================================================
-
-# PostgreSQLに接続する。
+# pg_connect -- PostgreSQLに接続する。
 # 入力値 : 
 #   server   : 接続先サーバ
 #   port     : 接続先ポート番号
@@ -33,26 +23,23 @@ def pg_connect(server, port, database, user, password):
   ret = psycopg2.connect(dsn)
   return ret
 
-# ベンチマークを実行する。
+# runner -- ベンチマークを実行する。
 # 入力値 :
-#   server   : 接続先サーバ
-#   port     : 接続先ポート番号
-#   database : 接続先データベース名
-#   user     : 接続ユーザ名
-#   password : 接続パスワード
-#   sql_files: ベンチマーク対象クエリのファイル名
-#   loop_cnt : ループ回数
-#   client_no: クライアント番号
-def runner(server, port, database, user, password, sql_files, loop_cnt, client_no):
+#   benchmark_server : ベンチマークサーバ
+#   result_server    : 結果格納先サーバ
+#   global_start     : ベンチマーク開始時刻(ベンチマーク結果の識別ID)
+#   sql_files        : ベンチマーク対象クエリのファイル名
+#   loop_cnt         : ループ回数
+#   client_no        : クライアント番号
+def runner(benchmark_server, result_server, global_start, sql_files, loop_cnt, client_no):
   # 結果格納用
-  pg_conn_result = pg_connect(pg_server, pg_port, pg_database, pg_user, pg_pass)
+  pg_conn_result = pg_connect(result_server['Server'], result_server['Port'], result_server['Database'], result_server['User'], result_server['Password'])
   pg_conn_result.autocommit = True
   # ベンチマーク実施サーバ
-  pg_conn_benchmark = pg_connect(server, port, database, user, password)
+  pg_conn_benchmark = pg_connect(benchmark_server['Server'], benchmark_server['Port'], benchmark_server['Database'], benchmark_server['User'], benchmark_server['Password'])
 
-  # ベンチマーク開始時刻(ベンチマーク結果の識別ID)
-  global_start = datetime.datetime.now().strftime(u'%Y%m%d_%H%M%S')
   for i in range(1, loop_cnt + 1):
+    print(u"[CLIENT %d] [LOOP %d] Benchmark starts." % (client_no, i))
     for sql_file in sql_files:
       # クエリ番号をファイル名から導出
       query_no = os.path.splitext(os.path.basename(sql_file))[0]
@@ -69,9 +56,10 @@ def runner(server, port, database, user, password, sql_files, loop_cnt, client_n
 
       # クエリ実行開始日時の記録
       with pg_conn_result.cursor() as cur:
-        cur.execute(u"INSERT INTO time_record (global_start, client_no, loop_count, query_no, start_time) VALUES ( %s, %s, %s, %s, now());", (global_start, client_no, loop_cnt, query_no))
+        cur.execute(u"INSERT INTO time_record (global_start, client_no, loop_count, query_no, start_time) VALUES ( %s, %s, %s, %s, now());", (global_start, client_no, i, query_no))
 
       # クエリ実行
+      print(u"[CLIENT %d] [LOOP %d] Start query \"%s\"." % (client_no, i, query_no))
       rows = None
       with pg_conn_benchmark.cursor() as cur:
         # TODO: EXPLAINと非EXPLAINの両方に対応させる
@@ -82,23 +70,89 @@ def runner(server, port, database, user, password, sql_files, loop_cnt, client_n
       # クエリ実行終了日時の記録
       with pg_conn_result.cursor() as cur:
         # TODO: EXPLAINと非EXPLAINの両方に対応させる
-        cur.execute(u"UPDATE time_record SET end_time = now(), result = %s WHERE global_start = %s and client_no = %s and loop_count = %s and query_no = %s;" , (Json(rows[0]), global_start, client_no, loop_cnt, query_no))
+        cur.execute(u"UPDATE time_record SET end_time = now(), result = %s WHERE global_start = %s and client_no = %s and loop_count = %s and query_no = %s;" , (Json(rows[0]), global_start, client_no, i, query_no))
+
+    print(u"[CLIENT %d] [LOOP %d] Benchmark ended." % (client_no, i))
+
+  # ベンチマーク終了
+  # 接続をClose
+  pg_conn_result.close()
+  pg_conn_benchmark.close()
+
+# task
+# マルチプロセッシングの呼び出し口
+# 入力値
+#   param: Iterator
+def task(params):
+  (benchmark_server, result_server, global_start, sql_files, loop_count, c_no) = params
+  runner(benchmark_server, result_server, global_start, sql_files, loop_count, c_no)
 
 # main
-#    
-def main():
-  sql_files = glob.glob("Queries/*.sql")
+# 入力値:
+#   dir          : クエリが格納されているディレクトリ
+#   loop_count   : ベンチマーク実行回数
+#   client_count : 同時実行するクライアント数
+#   config       : Configファイル名
+def main(dir, loop_count, client_count, config):
+  config_ini = configparser.ConfigParser()
+  config_ini.read(config, encoding = 'utf-8')
 
-  #TODO: マルチクライアント化
-  runner(u"localhost", u"5432", u"ssb_test", pg_user, pg_pass, sql_files, 1, 1)
+  sql_files = glob.glob(dir + u"/*.sql")
+
+  # ベンチマーク開始時刻(ベンチマーク結果の識別ID)
+  global_start = datetime.datetime.now().strftime(u'%Y%m%d_%H%M%S')
+
+  # ベンチマーク対象サーバと結果格納サーバの情報を準備
+  benchmark_server = config_ini['BENCHMARK']
+  result_server = config_ini['RESULT']
+
+  print(u"Start all of queries in \"%s\" directory." % dir)
+  print(u"Benchmark time of each queries will be recorded at \"time_record\" table")
+  print(u"with \"global_start\" = %s" % global_start)
+
+  if client_count == 1:
+    # シングルクライアント
+    print(u"Single Client mode")
+    print(u"The client runs %d time(s)." % loop_count)
+    runner(benchmark_server, result_server, global_start, sql_files, loop_count, 1)
+  else:
+    # マルチクライアント
+    print(u"Multi Client mode: Number of Client is %d" % client_count)
+    print(u"Each clients runs %d time(s)." % loop_count)
+    with concurrent.futures.ProcessPoolExecutor(max_workers = client_count) as executor:
+      params = map(lambda n : (benchmark_server, result_server, global_start, sql_files, loop_count, n), range(1, client_count + 1))
+      executor.map(task, params)
 
 
+# 最初
 if __name__ == "__main__":
-#  arg_parser = argparse.ArgumentParser()
-#  arg_parser.add_argument("-c", "--clients", type = int, help = u"同時実行するクライアント数")
-#  args = arg_parser.parse_args()
-#  print(args.clients)
+  # 引数の定義
+  arg_parser = argparse.ArgumentParser()
+  arg_parser.add_argument("-c", "--clients", type = int, help = u"同時実行するクライアント数")
+  arg_parser.add_argument("-l", "--loops", type = int, help = u"1クライアントあたりのループ回数")
+  arg_parser.add_argument("-C", "--config", type = str, help = u"設定ファイル")
+  arg_parser.add_argument("-q", "--queries", type = str, help = u"クエリが格納されているディレクトリ")
+  args = arg_parser.parse_args()
+
+  # 引数の格納先とデフォルト値
+  num_clients = 1
+  num_loops = 1
+  config_file = u"pg_ssb_run.ini"
+  query_dir = u"Queries"
+
+  # 引数の設定
+  if args.clients:
+    num_clients = args.clients
+  
+  if args.loops:
+    num_loops = args.loops
+  
+  if args.config:
+    config_file = args.config
+
+  if args.queries:
+    query_dir = args.queries  
 
   #num_psql_worker = 1 # デフォルト値
 
-  main()
+  main(query_dir, num_loops, num_clients, config_file)
