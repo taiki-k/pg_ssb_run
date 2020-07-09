@@ -101,5 +101,5 @@ Password = dummy
     この文献の"3.1 Query Definition"に掲載されているものを抜粋したものです。
 * このプログラムの動作は、以下のURLで公開されているWebページに記載されているDDLで行っています。  
   https://docs.aws.amazon.com/ja_jp/redshift/latest/dg/tutorial-tuning-tables-create-test-data.html
-  * `ddl.sample`にあるDDLは、このプログラムの利用者の利便のために、　　
+  * `ddl.sample`にあるDDLは、このプログラムの利用者の利便のために、  
     このWebページのDDL部分を抜粋したものです。
